@@ -1,64 +1,44 @@
-﻿using System;
-using System.Threading.Tasks;
-using System.IdentityModel.Tokens.Jwt;
-using Microsoft.CognitiveServices.Speech;
+﻿using Microsoft.CognitiveServices.Speech;
 using Microsoft.CognitiveServices.Speech.Audio;
 using Microsoft.CognitiveServices.Speech.Speaker;
-using Microsoft.Identity.Client;
-using System.Linq;
 
-string subscriptionKey = "8c8003be1b8240c0a444e93928a0de62";
 string region = "westus";
 VoiceProfile voiceProfile;
-UserData userData;
-string[] possibleAnswers = { "no", "i don't know", "don't know", "i do not know", "i can't remember", "i don't remember", "don't remember", "maybe", "i'm unsure", "no idea", "i'm not sure", "i am unsure" };
-(string,string) userDetails;
+UserData? userData = null;
 
-if(!StorageService.HasEnrolledUser())
-{
-    Console.WriteLine("You need to authenticate first");
-    userDetails = await AuthenticationService.SignInAndGetUserId();
-}
-else
-{
-    userData = await StorageService.Read();
-    userDetails = (userData.UserId, userData.Username);
-}
+var _configuration = ConfigService.GetAppConfiguration();
 
-var config = SpeechConfig.FromSubscription(subscriptionKey, region);
+var config = SpeechConfig.FromSubscription(_configuration["SubscriptionKey"], region);
 var inputConfig = AudioConfig.FromDefaultMicrophoneInput();
 using var recognizer = new SpeechRecognizer(config);
 using var synthesizer = new SpeechSynthesizer(config);
 
-await synthesizer.SpeakTextAsync("Welcome friend! Have you enrolled for voice verification before?");
-
-var result = await recognizer.RecognizeOnceAsync();
-if (ResponseIsNegative(result.Text))
+if(!StorageService.HasEnrolledUser())
 {
+    await synthesizer.SpeakTextAsync("Welcome friend! It seems that you haven't enrolled for voice verification before");
     await synthesizer.SpeakTextAsync("Well then, let's get you enrolled");
     await synthesizer.SpeakTextAsync("What's your name?");
     var username = await recognizer.RecognizeOnceAsync();
+
     if (!string.IsNullOrEmpty(username.Text))
     {
-        await VerificationEnroll(config, synthesizer);
+        userData = new UserData 
+        {
+            UserId = Guid.NewGuid().ToString("N"),
+            Username = username.Text,
+        };
+        await VerificationEnroll(config, synthesizer, username.Text);
     }
 }
-
-await SpeakerVerify(config, synthesizer);
-
-bool ResponseIsNegative(string response)
+else
 {
-    if(string.IsNullOrEmpty(response))
-        return true;
-
-    if(response.Contains('.') || response.Contains('?') || response.Contains('!'))
-    {
-        var sanitizedInput = response.Remove(response.IndexOf('.'), 1).ToLower();
-        return possibleAnswers.Contains(sanitizedInput);
-    }
-    
-    return possibleAnswers.Contains(response.ToLower());
+    userData = await StorageService.Read();
+    await synthesizer.SpeakTextAsync($"Welcome back {userData.Username}");
+    await synthesizer.SpeakTextAsync("Time to verify your identity");
 }
+
+// verify the user
+await SpeakerVerify(config, synthesizer);
 
 async Task VerificationEnroll(SpeechConfig config, SpeechSynthesizer speechSynthesizer, string username)
 {
@@ -70,12 +50,12 @@ async Task VerificationEnroll(SpeechConfig config, SpeechSynthesizer speechSynth
         {
             await speechSynthesizer.SpeakTextAsync($"Enrolling profile.");
 
-            VoiceProfileEnrollmentResult result = null;
+            VoiceProfileEnrollmentResult? result = null;
             while (result is null || result.RemainingEnrollmentsSpeechLength > TimeSpan.Zero)
             {
                 await speechSynthesizer.SpeakTextAsync("Please continue speaking to add more data to the voice sample.");
                 result = await client.EnrollProfileAsync(voiceProfile, audioInput);
-                var remainingTime = result.RemainingEnrollmentsSpeechLength.Value.TotalSeconds;
+                var remainingTime = result?.RemainingEnrollmentsSpeechLength?.TotalSeconds;
                 await speechSynthesizer.SpeakTextAsync($"You have {remainingTime} of enrollment audio time needed");
             }
 
@@ -83,6 +63,7 @@ async Task VerificationEnroll(SpeechConfig config, SpeechSynthesizer speechSynth
             {
                 userData.IsEnrolled = true;
                 userData.ProfileId = voiceProfile.Id;
+                await StorageService.Save(userData);
                 await speechSynthesizer.SpeakTextAsync("You have successfully enrolled for voice authentication!");
 
             }
@@ -97,7 +78,7 @@ async Task VerificationEnroll(SpeechConfig config, SpeechSynthesizer speechSynth
 
 async Task SpeakerVerify(SpeechConfig config, SpeechSynthesizer synthesizer)
 {
-    var profile = new VoiceProfile("1f808d93-fcf5-4113-a5a5-1e441cac7dd5",VoiceProfileType.TextIndependentVerification);
+    var profile = new VoiceProfile(userData?.ProfileId, VoiceProfileType.TextIndependentVerification);
     var speakerRecognizer = new SpeakerRecognizer(config, AudioConfig.FromDefaultMicrophoneInput());
     var model = SpeakerVerificationModel.FromProfile(profile);
 
@@ -114,6 +95,6 @@ async Task SpeakerVerify(SpeechConfig config, SpeechSynthesizer synthesizer)
         await synthesizer.SpeakTextAsync($"Voice authentication was unsuccessful. Please try again!");
         return;
     }
-    //{profileMapping[result.ProfileId]}
-    await synthesizer.SpeakTextAsync($"Congratulations, you have been authenticated with score {result.Score}");
+
+    await synthesizer.SpeakTextAsync($"Congratulations {userData?.Username}, you have been authenticated with score {result.Score}");
 }
